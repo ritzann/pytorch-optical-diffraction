@@ -101,15 +101,15 @@ class Propagate():
         if field_in is None:
             field_in = self._realPart + 1j*self._imagPart
         
-#         if pad != 0: # pad the input
-        if backend == np:
-            field_in = np.pad(field_in, ((pad, pad), (pad, pad)))
-            old_pix_number = field_in.shape[0]
-        elif backend == torch:
-            if type(field_in)==np.ndarray:
-                field_in = torch.from_numpy(field_in).to(self.device)
-            field_in = torch.nn.functional.pad(field_in, (pad, pad, pad, pad)).to(self.device)
-            old_pix_number = field_in.cpu().shape[0]
+        if pad != 0: # pad the input
+            if backend == np:
+                field_in = np.pad(field_in, ((pad, pad), (pad, pad)))
+                old_pix_number = field_in.shape[0]
+            elif backend == torch:
+                if type(field_in)==np.ndarray:
+                    field_in = torch.from_numpy(field_in).to(self.device)
+                field_in = torch.nn.functional.pad(field_in, (pad, pad, pad, pad)).to(self.device)
+                old_pix_number = field_in.cpu().shape[0]
 
         fx = backend.fft.fftshift(backend.fft.fftfreq(old_pix_number, d=old_pix_size))
         if backend == torch:
@@ -173,13 +173,13 @@ class Propagate():
         field_out : output field (observation plane)
         """
         
-        z = position
-        # old_pix_size = self._pixel_size # input plane grid spacing (spatial domain)
-        # old_pix_number = self._pixel_number # pixel number (spatial domain)
-        old_pix_size = pixel_size # input plane grid spacing (spatial domain)
-        old_pix_number = pixel_number # pixel number (spatial domain)
-        Lambda = self.get_lambda(photon_energy = photon_energy) # field wavelength
-        k = self.get_k(photon_energy = photon_energy) # wave number = 2*pi/Lambda or other fixed value
+        if self.device == "cpu":
+            backend = np # numpy
+        else:  # gpu
+            backend = torch
+            field_in = torch.from_numpy(field_in).to(self.device)
+            
+        # print(backend)
 
         if photon_energy is None:
             photon_energy = self.get_photon_energy()
@@ -187,16 +187,14 @@ class Propagate():
         if field_in is None:
             field_in = self._realPart + 1j*self._imagPart
             
-#         if pad != 0: # pad the input
-        if backend == np:
-            field_in = np.pad(field_in, ((pad, pad), (pad, pad)))
-            old_pix_number = field_in.shape[0]
-        elif backend == torch:
-            if type(field_in)==np.ndarray:
-                field_in = torch.from_numpy(field_in).to(self.device)
-            field_in = torch.nn.functional.pad(field_in, (pad, pad, pad, pad)).to(self.device)
-            old_pix_number = field_in.cpu().shape[0]
-
+        z = position
+        # old_pix_size = self._pixel_size # input plane grid spacing (spatial domain)
+        # old_pix_number = self._pixel_number # pixel number (spatial domain)
+        old_pix_size = pixel_size # input plane grid spacing (spatial domain)
+        old_pix_number = pixel_number # pixel number (spatial domain)
+        Lambda = self.get_lambda(photon_energy = photon_energy) # field wavelength
+        k = self.get_k(photon_energy = photon_energy) # wave number = 2*pi/Lambda or other fixed value
+        
         # Generate grid for the source plane (spatial domain)
         x = backend.arange(-old_pix_number/2, old_pix_number/2)*old_pix_size
         y1, x1 = backend.meshgrid(x,x)
@@ -204,13 +202,10 @@ class Propagate():
         
         # Generate grid in the Fourier domain
         fx = backend.fft.fftshift(backend.fft.fftfreq(old_pix_number, d=old_pix_size))
-        if backend == torch:
-            # Generate grid in the Fourier domain
-            fx = fx.to(self.device)
         fx, fy = backend.meshgrid(fx, fx)
         fsq = fx**2 + fy**2
         
-        new_pix_size = Lambda*abs(z)/(old_pix_number*old_pix_size)                           
+        new_pix_size = Lambda*backend.abs(z)/(old_pix_number*old_pix_size)                           
         m = new_pix_size/old_pix_size # scaling parameter
 
         # Generate grid for the observation plane 
@@ -219,23 +214,16 @@ class Propagate():
         r2sq = x2**2 + y2**2
 
         # Quadratic phase factors
-        if backend == torch:
-            Q1 = backend.exp(1j*k/2*(1-m)/z*r1sq).to(self.device)
-            Q2 = backend.exp(-1j*2*const.pi**2*z/m/k*fsq).to(self.device)
-            Q3 = backend.exp(1j*k/2*(m-1)/(m*z)*r2sq).to(self.device)
-        else:
-            Q1 = backend.exp(1j*k/2*(1-m)/z*r1sq)
-            Q2 = backend.exp(-1j*2*const.pi**2*z/m/k*fsq)
-            Q3 = backend.exp(1j*k/2*(m-1)/(m*z)*r2sq)
+        Q1 = backend.exp(1j*k/2*(1-m)/z*r1sq)
+        Q2 = backend.exp(-1j*2*const.pi**2*z/m/k*fsq)
+        Q3 = backend.exp(1j*k/2*(m-1)/(m*z)*r2sq)
         
-        print(type(Q1))
-        
-        if backend == np:
+        if self.device == "cpu":
             fft_field_in = backend.fft.fftshift(backend.fft.fft2(Q1 * field_in / m)).astype('complex64')
             field_out = Q3 * backend.fft.ifft2(backend.fft.ifftshift(Q2 * fft_field_in)).astype('complex64')
-        elif backend == torch:
+        else:  # gpu
             fft_field_in = backend.fft.fftshift(backend.fft.fft2(Q1 * field_in / m)).to(self.device)
-            field_out = Q3 * backend.fft.ifft2(backend.fft.ifftshift(Q2 * fft_field_in))
+            field_out = Q3 * backend.fft.ifft2(backend.fft.ifftshift(Q2 * fft_field_in)).cpu()
             
         if reset:
             self._realPart = field_out.real
@@ -244,24 +232,16 @@ class Propagate():
         return field_out.real + 1j*field_out.imag
     
             
-    def fresnel_onestep_IR(self,
-                           field_in=None,
-                           position=None,
-                           pixel_number=None, 
-                           pixel_size=None,
-                           photon_energy=None,
-                           pad=0,
-                           backend=torch,
-                           reset=True):
+    def fresnel_onestep(self,
+                        field_in=None,
+                        position=None,
+                        pixel_number=None, 
+                        pixel_size=None,
+                        photon_energy=None,
+                        reset=True):
         """
-        Implements Fresnel approximation in a single step using the Impulse Response (IR) method.
+        Implements Fresnel approximation in a single step using the impulse response method.
         Does NOT allow the user to control the grid spacing at the observation plane.
-        
-        Disadvantages:
-            - Introduces computational artifacts
-            - More limited than the Transfer Function (TF) approach in situations where both can be used
-        Advantages:
-            - Can simulate propagation over longer distances
         
         NOTE: Currently the Lorentz Propagator in TK's code!
         
@@ -282,175 +262,51 @@ class Propagate():
         Returns
         -------
         field_out : output field (observation plane)
-        
-        
-        Reference:
-        D. Voelz (2011), Computational Fourier Optics: A MATLAB Tutorial, Section 5.2
         """
-        
-        z = position
-        # old_pix_size = self._pixel_size # input plane grid spacing (spatial domain)
-        # old_pix_number = self._pixel_number # pixel number (spatial domain)
-        old_pix_size = pixel_size # input plane grid spacing (spatial domain)
-        old_pix_number = pixel_number # pixel number (spatial domain)
-        Lambda = self.get_lambda(photon_energy = photon_energy) # field wavelength
-        k = self.get_k(photon_energy = photon_energy) # wave number = 2*pi/Lambda or other fixed value
+
+        if self.device == "cpu": # gpu
+            backend = np # numpy
+        else:
+            backend = cp # cupy
 
         if photon_energy is None:
             photon_energy = self.get_photon_energy()
-        
+            
         if field_in is None:
             field_in = self._realPart + 1j*self._imagPart
             
-#         if pad != 0: # pad the input
-        if backend == np:
-            field_in = np.pad(field_in, ((pad, pad), (pad, pad)))
-            old_pix_number = field_in.shape[0]
-        elif backend == torch:
-            if type(field_in)==np.ndarray:
-                field_in = torch.from_numpy(field_in).to(self.device)
-            field_in = torch.nn.functional.pad(field_in, (pad, pad, pad, pad)).to(self.device)
-            old_pix_number = field_in.cpu().shape[0]
-        
+        z = position
+        # old_pix_size = self._pixel_size # source plane grid spacing (spatial domain)
+        # old_pix_number = self._pixel_number # pixel number (spatial domain)
+        Lambda = self.get_lambda(photon_energy = photon_energy) # field wavelength
+        k = self.get_k(photon_energy = photon_energy) # wave number = 2*pi/Lambda or other fixed value
+
         # Generate grid for the source plane (spatial domain)
-        if backend == torch: 
-            x = (backend.arange(-old_pix_number/2, old_pix_number/2)*old_pix_size).to(self.device)
-        else:
-            x = backend.arange(-old_pix_number/2, old_pix_number/2)*old_pix_size
+        x = np.arange(-old_pix_number/2, old_pix_number/2)*old_pix_size
         y1, x1 = backend.meshgrid(x,x) 
+        
+        # # Obtain source plane coordinates (spatial domain)
+        # x1 = self._x
+        # y1 = self._y
         
         # Generate grid for the observation plane 
         new_pix_size = Lambda*z/(old_pix_number*old_pix_size) 
-        x2 = backend.arange(-old_pix_number/2, old_pix_number/2)*new_pix_size
-        y2, x2 = backend.meshgrid(x2,x2)
+        x2 = np.arange(-old_pix_number/2, old_pix_number/2)*new_pix_size
+        y2, x2 = np.meshgrid(x2,x2)
         # x2, y2 = self._define_image_scale(pixel_size=new_pixel_size,reset=reset)
         
         # Perform Fresnel propagation to evaluate the field at the observation plane
         # Define the impulse response function h
-        if backend == torch:
-#             h = backend.exp(1j*k*z) / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2)).to(self.device)
-            h = 1 / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2)).to(self.device)
-        else:
-#             h = backend.exp(1j*k*z) / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2))
-            h = 1 / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2))
-        # Note: The exp(jkz) term can be ignored since it does not affect the spatial structure of the observation plane result
-            
-        if backend == np:
-            fft_field_in = backend.fft.fft2(field_in * backend.exp(1j*k/(2*z) * (x1**2 + y1**2))).astype('complex64')
-            field_out = h * backend.fft.fftshift(fft_field_in).astype('complex64')
-        elif backend == torch:
-            fft_field_in = backend.fft.fft2(field_in * backend.exp(1j*k/(2*z) * (x1**2 + y1**2))).to(self.device)
-            field_out = h * backend.fft.fftshift(fft_field_in)
-            
+        h = np.exp(1j*k*z) / (1j*Lambda*z) * np.exp(1j*k/(2*z) * (x2**2 + y2**2))
+        fft_field_in = backend.fft.fft2(field_in * np.exp(1j*k/(2*z) * (x1**2 + y1**2)))
+        field_out = h * backend.fft.fftshift(fft_field_in)
+
         if reset:
             self._realPart = field_out.real
             self._imagPart = field_out.imag
 
-        
-        print(Lambda)
         return field_out.real + 1j*field_out.imag
-    
-
-    def fresnel_onestep_TF(self,
-                           field_in=None,
-                           position=None,
-                           pixel_number=None, 
-                           pixel_size=None,
-                           photon_energy=None,
-                           pad=0,
-                           backend=torch,
-                           reset=True):
-        """
-        Implements Fresnel approximation in a single step using the Impulse Response (IR) method.
-        Does NOT allow the user to control the grid spacing at the observation plane.
-        
-
-        NOTE: Currently the Lorentz Propagator in TK's code!
-        
-        ----
-        Assumptions/conditions: 
-        1. Scalar diffraction
-        2. r >> lambda (the distance (r) between the source and observation plane, 
-        must be much greater than the source wavelength (lambda))
-        3. sqrt(fx**2 + fy**2) < 1/lambda 
-        ----
-
-        Parameters
-        ----------
-        field_in : input field (source plane)
-        position : propagation distance (z)
-        photon_energy : photon energy in keV
-
-        Returns
-        -------
-        field_out : output field (observation plane)
-        
-        
-        Reference:
-        D. Voelz (2011), Computational Fourier Optics: A MATLAB Tutorial, Section 5.2
-        """
-        
-        z = position
-        # old_pix_size = self._pixel_size # input plane grid spacing (spatial domain)
-        # old_pix_number = self._pixel_number # pixel number (spatial domain)
-        old_pix_size = pixel_size # input plane grid spacing (spatial domain)
-        old_pix_number = pixel_number # pixel number (spatial domain)
-        Lambda = self.get_lambda(photon_energy = photon_energy) # field wavelength
-        k = self.get_k(photon_energy = photon_energy) # wave number = 2*pi/Lambda or other fixed value
-
-        if photon_energy is None:
-            photon_energy = self.get_photon_energy()
-        
-        if field_in is None:
-            field_in = self._realPart + 1j*self._imagPart
-            
-#         if pad != 0: # pad the input
-        if backend == np:
-            field_in = np.pad(field_in, ((pad, pad), (pad, pad)))
-            old_pix_number = field_in.shape[0]
-        elif backend == torch:
-            if type(field_in)==np.ndarray:
-                field_in = torch.from_numpy(field_in).to(self.device)
-            field_in = torch.nn.functional.pad(field_in, (pad, pad, pad, pad)).to(self.device)
-            old_pix_number = field_in.cpu().shape[0]
-        
-        # Generate grid for the source plane (spatial domain)
-        if backend == torch: 
-            x = (backend.arange(-old_pix_number/2, old_pix_number/2)*old_pix_size).to(self.device)
-        else:
-            x = backend.arange(-old_pix_number/2, old_pix_number/2)*old_pix_size
-        y1, x1 = backend.meshgrid(x,x) 
-        
-        # Generate grid for the observation plane 
-        new_pix_size = Lambda*z/(old_pix_number*old_pix_size) 
-        x2 = backend.arange(-old_pix_number/2, old_pix_number/2)*new_pix_size
-        y2, x2 = backend.meshgrid(x2,x2)
-        # x2, y2 = self._define_image_scale(pixel_size=new_pixel_size,reset=reset)
-        
-        # Perform Fresnel propagation to evaluate the field at the observation plane
-        # Define the transfer function H
-        if backend == torch:
-#             h = backend.exp(1j*k*z) / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2)).to(self.device)
-            H = 1 / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2)).to(self.device)
-        else:
-#             h = backend.exp(1j*k*z) / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2))
-            h = 1 / (1j*Lambda*z) * backend.exp(1j*k/(2*z) * (x2**2 + y2**2))
-        # Note: The exp(jkz) term can be ignored since it does not affect the spatial structure of the observation plane result
-            
-        if backend == np:
-            fft_field_in = backend.fft.fft2(field_in * backend.exp(1j*k/(2*z) * (x1**2 + y1**2))).astype('complex64')
-            field_out = h * backend.fft.fftshift(fft_field_in).astype('complex64')
-        elif backend == torch:
-            fft_field_in = backend.fft.fft2(field_in * backend.exp(1j*k/(2*z) * (x1**2 + y1**2))).to(self.device)
-            field_out = h * backend.fft.fftshift(fft_field_in)
-            
-        if reset:
-            self._realPart = field_out.real
-            self._imagPart = field_out.imag
-
-        print(Lambda)
-        return field_out.real + 1j*field_out.imag    
-    
+                                            
                                                
     def fresnel_twostep(self,
                         field_in=None,
@@ -462,7 +318,6 @@ class Propagate():
         """
         Implements Fresnel approximation in two steps using the impulse response method.
         Allows the user to control the grid spacing at the observation plane.
-
 
         Assumptions/conditions: 
         ----
@@ -600,8 +455,7 @@ class Propagate():
         return field_out.real + 1j*field_out.imag
                                                               
                                                             
-## utils
-
+                                                              
     def set_pixel_number(self,pixel_number):
         self._pixel_number = pixel_number
         if self._pixel_size is not None:
